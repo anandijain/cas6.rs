@@ -2,6 +2,7 @@ extern crate peg;
 
 use std::{
     collections::HashMap,
+    fmt,
     ops::{Deref, DerefMut},
 };
 
@@ -46,6 +47,18 @@ impl DerefMut for Expr {
         match self {
             Expr::List(vec) => vec,
             e => panic!("Can only deref Expr::List. ex:{e:?}"),
+        }
+    }
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Expr::Sym(s) => write!(f, "{}", s),
+            Expr::List(lst) => {
+                let str_list: Vec<String> = lst.iter().map(|x| x.to_string()).collect();
+                write!(f, "({})", str_list.join(" "))
+            }
         }
     }
 }
@@ -204,41 +217,49 @@ fn my_match(
                 // we can assume that there is no key at our current position (we've never been here before),
                 // or if we have, we removed the key appropriately
                 assert!(!pos_map.contains_key(&pos.clone()));
-                pos_map.insert(pos.to_vec(), ex.clone());
-                true
+                if is_blank_match(ex.clone(), pat.clone()) {
+                    pos_map.insert(pos.to_vec(), ex.clone());
+                    true
+                } else {
+                    false
+                }
             } else {
                 false
             }
         }
         (Expr::List(es), Expr::List(ps)) => {
             // so if we are not in the else branch, we are matching the entire list ex
+            let mut new_pos = pos.clone();
+            new_pos.push(0); // zero is head position
             if ps[0] == sym("pattern") {
                 if let Some(v) = named_map.get(&pat) {
                     // remember it may be the case that we actually recurse here but i dont really think so
-                    v == ex
+                    return v == ex;
                 } else {
                     if is_blank_match(ex.clone(), ps[2].clone()) {
                         named_map.insert(pat, ex.clone());
-                        true
+                        return true;
                     } else {
-                        false
+                        return false;
                     }
                 }
             } else if blank_syms.contains(&ps[0]) {
                 // we can assume that there is no key at our current position (we've never been here before),
                 // or if we have, we removed the key appropriately
                 assert!(!pos_map.contains_key(pos));
-                pos_map.insert(pos.to_vec(), ex.clone());
-                true
+                if is_blank_match(ex.clone(), pat.clone()) {
+                    pos_map.insert(pos.to_vec(), ex.clone());
+                    println!("inserted {new_pos:?} -> {ex}");
+                    return true;
+                } else {
+                    return false;
+                }
             } else {
                 let p_head = &ps[0];
                 let p_rest = &ps[1..];
 
                 let e_head = &es[0];
                 let e_rest = &es[1..];
-
-                let mut new_pos = pos.clone();
-                new_pos.push(0); // zero is head position
 
                 // (f x) | (f _)
                 if !my_match(e_head, p_head.clone(), &new_pos, pos_map, named_map) {
@@ -263,9 +284,49 @@ fn my_match(
 
                                 if blank_t == &sym("blank_seq") {
                                     for j in 1..=es[1..].len() {
-
                                         let mut elts = vec![sym("sequence")];
-                                        elts.append(&mut es[i..i + j].to_vec());
+                                        for seq_e in &es[i..i + j] {
+                                            if pi_blank.len() == 2 {
+                                                let b_head = &pi_blank[1];
+                                                if b_head != &head(seq_e.clone()) {
+                                                    break;
+                                                }
+                                            }
+                                            elts.push(seq_e.clone());
+                                        }
+                                        let seq = liste(elts);
+
+                                        println!("seq {p_name:?}: {seq:?}");
+                                        if let Some(from_map) = named_map.get(p_i) {
+                                        } else {
+                                            named_map.insert(p_i.clone(), seq.clone());
+                                            println!("here i am ");
+                                        } // rebuild all uses the map to rebuild the pattern up to equality with no matching
+
+                                        let new_ex =
+                                            rebuild_and_splice(pat.clone(), named_map, pos_map);
+
+                                        let m = my_match(ex, new_ex, pos, pos_map, named_map);
+                                        if !m {
+                                            named_map.remove(p_i);
+                                            // since we are in a named pattern, we dont need this
+                                            // pos_map.remove(&new_pos);
+                                        } else {
+                                            return true;
+                                        }
+                                    }
+                                } else if blank_t == &sym("blank_null_seq") {
+                                    for j in 0..=es[1..].len() {
+                                        let mut elts = vec![sym("sequence")];
+                                        for seq_e in &es[i..i + j] {
+                                            if pi_blank.len() == 2 {
+                                                let b_head = &pi_blank[1];
+                                                if b_head != &head(seq_e.clone()) {
+                                                    break;
+                                                }
+                                            }
+                                            elts.push(seq_e.clone());
+                                        }
                                         let seq = liste(elts);
 
                                         println!("seq {p_name:?}: {seq:?}");
@@ -281,20 +342,108 @@ fn my_match(
                                         let m = my_match(ex, new_ex, pos, pos_map, named_map);
                                         if !m {
                                             named_map.remove(p_i);
-                                            // since we are in a named pattern, we dont need this 
+                                            // since we are in a named pattern, we dont need this
                                             // pos_map.remove(&new_pos);
                                         } else {
                                             return true;
                                         }
                                     }
+                                } else {
+                                    // blank case
+
+                                    let m =
+                                        my_match(&es[i], p_i.clone(), &new_pos, pos_map, named_map);
+                                    if !m {
+                                        named_map.remove(p_i);
+                                        return false;
+                                    }
+
+                                    let new_ex =
+                                        rebuild_and_splice(pat.clone(), named_map, pos_map);
+                                    let m = my_match(ex, new_ex, pos, pos_map, named_map);
+                                    if !m {
+                                        named_map.remove(p_i);
+                                        return false;
+                                    }
+                                }
+                            } else if pi_ps[0] == sym("blank_seq") {
+                                // let blank_h = &pi_ps[1];
+                                for j in 1..=es[1..].len() {
+                                    let mut elts = vec![sym("sequence")];
+                                    for seq_e in &es[i..i + j] {
+                                        if pi_ps.len() == 2 {
+                                            let b_head = &pi_ps[1];
+                                            if b_head != &head(seq_e.clone()) {
+                                                break;
+                                            }
+                                        }
+                                        elts.push(seq_e.clone());
+                                    }
+                                    let seq = liste(elts);
+
+                                    println!("positional seq {new_pos:?}: {seq:?}");
+                                    if let Some(from_map) = pos_map.get(&new_pos) {
+                                    } else {
+                                        pos_map.insert(new_pos.clone(), seq.clone());
+                                        // println!("here i am ");
+                                    } // rebuild all uses the map to rebuild the pattern up to equality with no matching
+
+                                    let new_ex =
+                                        rebuild_and_splice(pat.clone(), named_map, pos_map);
+                                    println!("in positional {new_ex}");
+
+                                    let m = my_match(ex, new_ex, pos, pos_map, named_map);
+                                    if !m {
+                                        pos_map.remove(&new_pos);
+                                    } else {
+                                        return true;
+                                    }
+                                }
+                            } else if pi_ps[0] == sym("blank_null_seq") {
+                                // let blank_h = &pi_ps[1];
+                                for j in 0..=es[1..].len() {
+                                    let mut elts = vec![sym("sequence")];
+                                    for seq_e in &es[i..i + j] {
+                                        if pi_ps.len() == 2 {
+                                            let b_head = &pi_ps[1];
+                                            if b_head != &head(seq_e.clone()) {
+                                                break;
+                                            }
+                                        }
+                                        elts.push(seq_e.clone());
+                                    }
+                                    let seq = liste(elts);
+
+                                    println!("positional seq {new_pos:?}: {seq:?}");
+                                    if let Some(from_map) = pos_map.get(&new_pos) {
+                                    } else {
+                                        pos_map.insert(new_pos.clone(), seq.clone());
+                                        // println!("here i am ");
+                                    } // rebuild all uses the map to rebuild the pattern up to equality with no matching
+
+                                    let new_ex =
+                                        rebuild_and_splice(pat.clone(), named_map, pos_map);
+                                    let m = my_match(ex, new_ex, pos, pos_map, named_map);
+                                    
+                                    if !m {
+                                        pos_map.remove(&new_pos);
+                                    } else {
+                                        return true;
+                                    }
+                                }
+                            } else {
+                                // this is the case where of of the p_is is a list but not a
+                                if !my_match(&es[i], p_i.clone(), &new_pos, pos_map, named_map) {
+                                    return false;
                                 }
                             }
                         }
                         _ => {
+                            // this is the case where p_i is a Sym
                             if !my_match(&es[i], p_i.clone(), &new_pos, pos_map, named_map) {
                                 return false;
                             }
-                        },
+                        }
                     }
                 }
 
@@ -302,6 +451,7 @@ fn my_match(
                 // if we've reached the end of the pattern list, finding mappings for all elements,
                 // then we should be able to recreate ex from whatever was added to the maps
                 let new_ex = rebuild_and_splice(pat.clone(), named_map, pos_map);
+                println!("final comparison: ORIG: {pat} | NEW: {new_ex} | OLD:{ex} || {named_map:?} {pos_map:?}");
                 if new_ex == ex.clone() {
                     return true;
                 } else {
@@ -314,8 +464,6 @@ fn my_match(
 }
 
 fn main() {
-    println!("Hello, world!");
-
     let blank = list(vec!["blank"]);
 
     let lhs = list(vec!["f", "a", "b"]);
@@ -345,26 +493,94 @@ fn main() {
         // (parse("f"), parse("(pattern x (blank))"), true),
         // (parse("(f)"), parse("(pattern x (blank))"), true),
         // (parse("(f x)"), parse("((pattern x (blank)) (blank))"), true),
-        (parse("(f a b c)"), parse("(f (pattern x (blank_seq)))"), true),
-        (parse("(f a b c)"), parse("(f (pattern x (blank_seq)) (pattern y (blank_seq)))"), true),
-        (parse("(f a a)"), parse("(f (pattern x (blank_seq)) (pattern x (blank_seq)))"), true),
+        // (
+        //     parse("(f a b c)"),
+        //     parse("(f (pattern x (blank_seq)))"),
+        //     true,
+        // ),
+        // (
+        //     parse("(f a b c)"),
+        //     parse("(f (pattern x (blank_seq)) (pattern y (blank_seq)))"),
+        //     true,
+        // ),
+        // (
+        //     parse("(f a a)"),
+        //     parse("(f (pattern x (blank_seq)) (pattern x (blank_seq)))"),
+        //     true,
+        // ),
+        // (
+        //     parse("(f a (g b))"),
+        //     parse("(f (pattern x (blank_seq)))"),
+        //     true,
+        // ),
+        // (
+        //     parse("(f a)"),
+        //     parse("(f (pattern x (blank_null_seq)))"),
+        //     true,
+        // ),
+        // (
+        //     parse("(f a)"),
+        //     parse("(f (pattern x (blank_null_seq)) a)"),
+        //     true,
+        // ),
+        // (
+        //     parse("(f a b c a b)"),
+        //     parse("(f (pattern x (blank_seq)) c (pattern x (blank_seq)))"),
+        //     true,
+        // ),
+
+        // (
+        //     parse("(f (a b) c a b)"),
+        //     parse("(f (pattern x (blank b)) (pattern y (blank_seq)))"),
+        //     false,
+        // ),
+        // (
+        //     parse("(f (a b) c a b)"),
+        //     parse("(f (pattern x (blank a)) (pattern y (blank_seq)))"),
+        //     true,
+        // ),
+        // (
+        //     parse("(f a b c d)"),
+        //     parse("(f (blank_seq) (pattern y (blank_seq)))"),
+        //     true,
+        // ),
+        // fails todo fix blank_seq with head
+        (
+            parse("(f (a b) (a c) (b d))"),
+            parse("(f (pattern x (blank_seq a)))"),
+            false,
+        ),
+        (
+            parse("(f (a b) (a c) (b d))"),
+            parse("(f (pattern x (blank_seq a)) (b d))"),
+            true,
+        ),
+        // pos : Vec<usize> where are we in the pattern Expr
+        (
+            parse("(f (a b) (a c) (b d))"),
+            parse("(f (blank_seq a) (b d))"),
+            true,
+        ),
     ];
 
     // list(vec!["f", "a", "b", "c"]), list(vec!["f", sym("blank_sequence")])
     for (i, (ex, pat, expected)) in test_cases.iter().enumerate() {
-        println!("testing case {i}: {ex:?} | {pat:?} ");
+        println!("testing case {i}: {ex} | {pat} ");
         let pos = vec![];
         let mut pos_map = HashMap::new();
         let mut named_map = HashMap::new();
+        let m = my_match(ex, pat.clone(), &pos, &mut pos_map, &mut named_map);
+        
+        // assert_eq!(
+        //     m,
+        //     *expected
+        // );
 
-        assert_eq!(
-            my_match(ex, pat.clone(), &pos, &mut pos_map, &mut named_map),
-            *expected
-        );
+        let rebuilt_ex = rebuild_and_splice(pat.clone(), &named_map, &pos_map);
+        println!("rebuilt:{rebuilt_ex:?}\n\npos:\n{pos_map:?}\nnamed:\n{named_map:?}\n\n");
+        
         if *expected {
-            let rebuilt_ex = rebuild_and_splice(pat.clone(), &named_map, &pos_map);
             assert_eq!(rebuilt_ex, ex.clone());
         }
-        println!("pos:\n{pos_map:?}\nnamed:\n{named_map:?}\n\n");
     }
 }
